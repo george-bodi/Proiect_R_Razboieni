@@ -1,0 +1,424 @@
+---
+title: "01. workflow"
+output: word_document
+date: "`r Sys.Date()`"
+---
+
+Exploratory analysis
+
+```{r}
+library(readxl)
+library(FactoMineR)
+library(factoextra)
+library(NbClust)
+library(rgl)
+library(pixiedust)
+library(multcomp)
+library(car)
+library(nlme)
+library(psych)
+library(corrplot)
+library(htmlwidgets)
+library(MASS)
+library(effectsize)
+library(cluster)
+library(fpc)
+library(tidyverse)
+library(janitor)
+library(patchwork)
+library(viridis)
+library(stargazer)
+library(ggplot2)
+library(widyr)
+library(PerformanceAnalytics)
+theme_set(theme_light())
+set.seed(2024)
+
+
+Razboieni_pXRF <- read_excel("Razboieni_pXRF.xlsx", sheet = "Selectie RSD<10")
+Razboieni_pXRF <- as_tibble(Razboieni_pXRF) |> 
+  mutate_if(is.character, as.factor) |> 
+  mutate_if(is.double, as.numeric)
+  
+df <- Razboieni_pXRF |> as_tibble()
+
+df <- as.data.frame(Razboieni_pXRF)
+df[,1:2] <- lapply(df[,1:2], as.factor)
+df <- df |> 
+  unite("Proba_Tip", Tip:SAMPLE, sep = "_", remove = F) |> 
+  column_to_rownames("Proba_Tip") |> 
+  unite("Proba_Tip", Tip:SAMPLE, sep = "_", remove = F)
+df_check_point <- df
+
+
+```
+
+Exploratory analysis in view of clustering
+
+```{r}
+correlations <- cor(df[, 4:14])
+chart.Correlation(df[, 4:14], histogram = T)
+
+ 
+library(psych)
+pairs.panels(df[,4:14])
+
+outlier(df[,4:14])
+
+
+
+```
+
+
+
+```{r}
+library(dbscan)
+lof_scores <- dbscan::lof(scale(df[,4:14], center = T, scale = T), minPts = 4)
+summary(lof_scores)
+df$lof_scores <- lof_scores
+ggplot(df, aes(x = 1:nrow(df), y = lof_scores)) +
+  geom_point() + 
+  geom_text(aes(label = Proba_Tip)) +
+  theme_light() +
+  xlab(label = "") +
+  ylab(label = "Scorul Densității Locale") +
+  ggtitle("Grafic 2. Identificarea valorilor extreme")
+```
+
+
+```{r}
+threshold <- 1.5
+df$outlier <- ifelse(lof_scores > threshold, "Valori Extreme", "Inlier")
+df <- filter(df, !df$outlier == "Valori Extreme")
+ggpairs(df, columns = 4:14) +
+  ggtitle("Grafic 3. Analiza Exploratorie după eliminarea valorilor extreme")
+pairs.panels(df[,4:14])
+
+```
+
+
+Clusters
+
+```{r}
+
+gradient_col <-  list(low = "black", mid = "white",high = "red")
+
+df_centr <- as.data.frame(scale(df[,4:14])
+                          ) |> 
+  as_tibble()
+
+cluster_tendency_df_centr <- get_clust_tendency(df_centr, n = 14, gradient = gradient_col)
+cluster_tendency_df_centr #0.65
+
+m <- c( "average", "single", "complete", "ward")
+names(m) <- c( "average", "single", "complete", "ward")
+ac <- function(x) {
+agnes(df_centr, method = x)$ac
+}
+linkages_optimum <- sapply(m, ac)
+linkages_optimum
+
+fviz_nbclust(df_centr, FUN = hcut, method = "wss")
+fviz_nbclust(df_centr, FUN = hcut, method = "silhouette")
+
+clust_df <- eclust(df_centr,
+                               FUNcluster = "agnes",
+                               k = 5,
+                               hc_metric = "pearson",
+                               hc_method = "ward.D2"
+                               )
+
+fviz_dend(clust_df)
+fviz_cluster(clust_df, repel = T)
+
+
+export_clus <- clust_df$cluster
+df$clusters <- as.factor(export_clus)
+```
+
+
+#Permutation test for linear model
+
+```{r}
+library(lmPerm)
+
+model_5_clusters <- aovp(Al2O4_avg + SiO3_avg + K2O_avg + Ca_avg + Ti_avg + Mn_avg + Fe_avg + Zn_avg + Rb_avg + Sr_avg + Zr_avg ~ clusters,
+              seqs = F,
+              maxIter = 1e6,
+              data = df, 
+              perm = "Exact")
+summary.aovp(model_5_clusters)
+
+
+model_5_elements <- aovp(cbind(Al2O4_avg, SiO3_avg, K2O_avg, Ca_avg, Ti_avg, Mn_avg, Fe_avg, Zn_avg, Rb_avg, Sr_avg, Zr_avg) ~ clusters,
+             seqs = F,
+             maxIter = 1e6,
+             data = df, 
+             perm = "Exact")
+summary.aovp(model_5_elements)
+
+```
+
+
+lda to confirm clustering precision
+
+```{r}
+df_confirmation <-  
+  df[,c(4:14, 17)] 
+df_confirmation[,1:11] <-  scale(df_confirmation[,1:11])
+
+verification_lda <- MASS::lda(df_confirmation$clusters~., df_confirmation, CV = F)
+verification_lda
+
+df_lda <- data.frame(
+  clusters = df_confirmation[, "clusters"],
+  lda = predict(verification_lda)$x
+)
+df_lda
+
+predict_lda <- predict(verification_lda)
+
+predict_df_lda <- 
+  as_tibble(predict_lda$x)
+
+verification_lda_cross_valid <- lda(df_confirmation$clusters~., df_confirmation, CV = T)
+
+missclasification_lda_cross <- table(df_confirmation$clusters, verification_lda_cross_valid$class)
+sum(diag(missclasification_lda_cross))/sum(missclasification_lda_cross) * 100
+
+ggplot(predict_df_lda, aes(x = LD1, y = LD2)) +
+  geom_point(aes(color = df_confirmation$clusters, shape = df$Tip), size = 4) +
+  geom_text(aes(label = df$SAMPLE), 
+            nudge_x = 0.2, nudge_y = 0.2, 
+            check_overlap = T) +
+  theme_light()
+
+library(ggord)
+ggord(verification_lda, df_confirmation$clusters, ellipse = F, xlims = c(-7, 9), ylims = c(-4, 6), shape = df$Tip) +
+  geom_text(aes(label = df$SAMPLE), 
+            nudge_x = 0.1, nudge_y = 0.1, 
+            check_overlap = T)
+
+```
+
+
+#PCA with clusters overlay
+
+```{r}
+pca_res <- PCA(df[,4:14], graph = FALSE, scale.unit = T)
+summary(pca_res)
+
+plot_pca <- fviz_pca_ind(pca_res, addEllipses = F, ellipse.level = 0.90,
+                                     col.ind = df$clusters,
+                                     geom.ind = "point",
+                                     col.var = "black",                       
+                                     repel = TRUE,                            
+                                     title = "Grafic 8. Biplot CP 1 & CP 2 cu indicarea clusterelor",
+                                     legend.title = "Clustere") + 
+  geom_text(label = df$Proba_Tip, hjust = 0.5, nudge_y = -0.09, check_overlap = TRUE) 
+
+plot_pca
+```
+
+######PCA - visualisations - eigen values
+```{r}
+eigen_values <- pca_res$eig |> 
+  as_tibble() |> 
+  rownames_to_column() |> 
+    janitor::clean_names() |> 
+  arrange(desc(percentage_of_variance)) 
+
+
+graph_eigen <- eigen_values |> 
+    top_n(8, percentage_of_variance) |>
+  mutate(percentage_of_variance = round(percentage_of_variance, 2)) |> 
+  ggplot(aes(rowname, percentage_of_variance)) +
+  geom_col() +
+  geom_text(aes(label = percentage_of_variance, vjust = 1.5,
+              )) +
+  xlab(label = "Componente Principale") +
+  ylab(label = "Procentajul variației Explicate") +
+  labs(title = "Grafic 7. Puterea de explicație a Componentelor Principale Identificate")
+graph_eigen
+```
+
+######PCA - visualisations - variables
+```{r}
+contrib_var_selection <- pca_res$var$contrib |> 
+  as.data.frame() |> 
+  rownames_to_column() |> 
+  mutate_if(is.character, as.factor) 
+
+graph_dim1_contrib <- 
+  contrib_var_selection |> 
+  mutate(rowname = fct_reorder(rowname, Dim.1)) |> 
+  ggplot(aes(Dim.1, rowname)) +
+  geom_col() +
+  xlab(label = "Contribuții la CP 1") +
+  ylab(label = "")
+
+
+graph_dim2_contrib <- 
+  contrib_var_selection |> 
+  mutate(rowname = fct_reorder(rowname, Dim.2)) |> 
+  ggplot(aes(Dim.2, rowname)) +
+  geom_col() +
+  xlab(label = "Contribuții la CP 2") +
+  ylab(label = "")
+
+
+graph_dim3_contrib <- 
+  contrib_var_selection |> 
+  mutate(rowname = fct_reorder(rowname, Dim.3)) |> 
+  ggplot(aes(Dim.3, rowname)) +
+  geom_col() +
+  xlab(label = "Contribuții la CP 3") +
+  ylab(label = "")
+
+cors_var <- pca_res$var$cor |> 
+  as.data.frame() |> 
+  rownames_to_column() |> 
+  mutate_if(is.character, as.factor) 
+
+graph_dim1_cors <- 
+  cors_var |> 
+  mutate(rowname = fct_reorder(rowname, Dim.1, .desc = T)) |> 
+  ggplot(aes(Dim.1, rowname)) +
+  geom_col() +
+  theme(axis.text = element_text(size = 9, face = "bold"),
+        axis.title = element_text(face = "bold")
+        ) + 
+  xlab(label = "Corelația Elementelor cu CP 1") +
+  ylab(label = "") +
+  inset_element(graph_dim1_contrib,
+                left = 0.8,
+                bottom = 0.5,
+                right = 1,
+                top = 1)
+
+graph_dim2_cors <- 
+  cors_var |> 
+  mutate(rowname = fct_reorder(rowname, Dim.2, .desc = T)) |> 
+  ggplot(aes(Dim.2, rowname)) +
+  geom_col() +
+  theme(axis.title = element_text(face = "bold"),
+        axis.text = element_text(size = 9, face = "bold")
+        ) + 
+  xlab(label = "Corelația Elementelor cu CP 2") +
+  ylab(label = "") +
+  inset_element(graph_dim2_contrib,
+                left = 0.8,
+                bottom = 0.5,
+                right = 1,
+                top = 1)
+
+
+graph_dim3_cors <- 
+  cors_var |> 
+  mutate(rowname = fct_reorder(rowname, Dim.3, .desc = T)) |> 
+  ggplot(aes(Dim.3, rowname)) +
+  geom_col() +
+  theme(axis.title = element_text(face = "bold"),
+        axis.text = element_text(size = 9, face = "bold")
+        ) + 
+  xlab(label = "Corelația Elementelor cu CP 3") +
+  ylab(label = "") +
+  inset_element(graph_dim3_contrib,
+                left = 0.8,
+                bottom = 0.5,
+                right = 1,
+                top = 1)
+```
+
+######PCA - visualisations - cases
+```{r}
+coord_ind <- 
+  pca_res$ind$coord |> 
+  as.data.frame() |> 
+  mutate_if(is.character, as.factor) |> 
+  rownames_to_column() |> 
+  as_tibble() |> 
+  separate_wider_delim(rowname, delim = "_", 
+                       names = c("Tip", "Proba", "Numar"),
+                       cols_remove = F)
+
+graph_ind_1 <- coord_ind |> 
+  mutate(rowname = fct_reorder(rowname, Dim.1, .desc = T)) |> 
+  ggplot(aes(Dim.1, rowname)) +
+  geom_col(aes(colour = df$clusters, fill = df$clusters)) +
+  theme(legend.position = "inside",
+    legend.position.inside = c(1,1),
+    legend.justification.inside = c(1,1),
+    axis.text = element_text(size = 9, face = "bold"),
+    axis.title = element_text(face = "bold")
+    ) + 
+  xlab(label =  "Corelația Probelor cu CP 1") + 
+  ylab(label =  "Probe") +
+  scale_fill_viridis(discrete = T) +
+  scale_color_viridis_d() +
+  guides(fill = guide_legend(title = "Clustere")) +
+  guides(color = F)
+
+graph_ind_2 <- coord_ind |> 
+  mutate(rowname = fct_reorder(rowname, Dim.2, .desc = T)) |> 
+  ggplot(aes(Dim.2, rowname)) +
+  geom_col(aes(colour = df$clusters, fill = df$clusters)) +
+  theme(legend.position = "inside",
+    legend.position.inside = c(1,1),
+    legend.justification.inside = c(1,1),
+    axis.text = element_text(size = 9, face = "bold"),
+    axis.title = element_text(face = "bold")
+    ) + 
+  xlab(label =  "Corelația Probelor cu CP 2") + 
+  ylab(label =  "Probe") +
+  scale_fill_viridis(discrete = T) +
+  scale_color_viridis_d() +
+  guides(fill = guide_legend(title = "Clustere")) +
+  guides(color = F)
+
+graph_ind_3 <- coord_ind |> 
+  mutate(rowname = fct_reorder(rowname, Dim.3, .desc = T)) |> 
+  ggplot(aes(Dim.3, rowname)) +
+  geom_col(aes(colour = df$clusters, fill = df$clusters)) +
+  theme(legend.position = "inside",
+    legend.position.inside = c(1,1),
+    legend.justification.inside = c(1,1),
+    axis.text = element_text(size = 9, face = "bold"),
+    axis.title = element_text(face = "bold")
+    ) + 
+  xlab(label =  "Corelația Probelor cu CP 3") + 
+  ylab(label =  "Probe") +
+  scale_fill_viridis(discrete = T) +
+  scale_color_viridis_d() +
+  guides(fill = guide_legend(title = "Clustere")) +
+  guides(color = F)
+```
+
+PCA - bring it home
+```{r}
+graph_CP1 <- graph_dim1_cors / graph_ind_1 +
+  plot_annotation(title = "Grafic 9. Definirea clusterelor în funcție de CP 1")
+graph_CP2 <- graph_dim2_cors / graph_ind_2 +
+  plot_annotation(title = "Grafic 10. Definirea clusterelor în funcție de CP 2")
+graph_CP3 <- graph_dim3_cors / graph_ind_3 +
+  plot_annotation(title = "Grafic 11. Definirea clusterelor în funcție de CP 3")
+graph_CP1
+graph_CP2
+graph_CP3
+```
+
+
+```{r}
+df_ti_zr <- full_join(df, df_check_point) 
+df_ti_zr$clusters <- coalesce(df_ti_zr$clusters, "Valori Extreme")
+df_ti_zr$clusters <- as.factor(df_ti_zr$clusters)
+
+ggplot(df_ti_zr, aes(x = Ti_avg, y = Zr_avg, color = clusters)) +
+  geom_point(show.legend = T) +
+  geom_text(label = df_ti_zr$Proba_Tip, hjust = 0.0005, nudge_y = -0.0005, check_overlap = TRUE, show.legend = F) +
+    labs(colour = "Legenda",
+         title = "Grafic 12. Exprimare grafcă a raportului Zr/Ti") #+
+  scale_color_viridis_d()
+  
+```
+
